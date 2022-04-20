@@ -2748,6 +2748,7 @@ showHelp(){
   echo "  diagnose {all|node} [nodename]    diagnose connectivity of all nodes or a specific node"
   echo "  tuning {install-fastpath|local-install-fastpath|remove-fastpath|install-stt|local-install-stt|remove-stt} {centos7|centos8}} [kernel-devel-version]  deploy  kernel optimisation components to the system"
   echo "  reload restart all kube-ovn components"
+  echo "  env-check check the environment configuration"
 }
 
 tcpdump(){
@@ -3100,7 +3101,7 @@ getOvnCentralPod(){
     if [ -z "$VERSION" ]; then
           echo "kubeovn version not exists"
           exit 1
-        fi
+    fi
     KUBE_OVN_VERSION=$VERSION
 }
 
@@ -3408,6 +3409,60 @@ reload(){
   kubectl rollout status deployment/kube-ovn-monitor -n kube-system
 }
 
+env-check(){
+  set +e
+  echo "1) check cni configuration"
+  if [ ! -e "/etc/cni/net.d" ]; then
+    echo "Directory /etc/cni/net.d does not exist, please check kube-ovn-cni pod status"
+  fi
+  for file in $(ls "/etc/cni/net.d")
+  do
+    if [[ ! $file =~ "kube-ovn.conflist" ]]; then
+      echo "Check files in /etc/cni/net.d, make sure if the config file $file should be deleted"
+    fi
+  done
+
+  echo "2) check system ipv4 config"
+  probe_mtu=`cat /proc/sys/net/ipv4/tcp_mtu_probing`
+  if [ $probe_mtu == 0 ]; then
+    echo "The 'tcp_mtu_probing' config may affect traffic, make sure if /proc/sys/net/ipv4/tcp_mtu_probing should be set to 1"
+  fi
+  recycle=`cat /proc/sys/net/ipv4/tcp_tw_recycle`
+  if [ $recycle == 1 ]; then
+    echo "The 'tcp_tw_recycle' config affects nodeport service, make sure change /proc/sys/net/ipv4/tcp_tw_recycle to 0"
+  fi
+
+  echo "3) check checksum value"
+  netstat -s > /dev/null
+  if [[ $? != 0 ]]; then
+    echo "The netstat cmd not found, maybe can be installed mannully by exec 'yum install net-tools' and exec 'netstat -s' to check if there is 'InCsumErrors'"
+    echo "If there's 'InCsumErrors' and the value is increasing, should exec cmd 'ethtool -K ETH tx off' to disable checksum, where 'ETH' is the nic used for traffics"
+  else
+    result=`netstat -s`
+    if [[ $result =~ "InCsumErrors" ]]; then
+      echo "Found 'InCsumErrors' para after exec 'netstat -s' cmd, check if the value is increasing, maybe should exec cmd 'ethtool -K ETH tx off' to disable checksum, where 'ETH' is the nic used for traffics"
+    fi
+  fi
+
+  echo "4) check dns config"
+  result=`cat /etc/resolv.conf`
+  if [[ $result =~ ".com" ]]; then
+    echo "There's *.com in dns search name, make sure the config /etc/resolv.conf is right"
+  fi
+
+  echo "5) check firewall config"
+  result=`systemctl status firewalld`
+  if [[ $result =~ "running" ]]; then
+    echo "The firewalld is running, make sure it has no effect on traffics across nodes"
+  fi
+
+  echo "6) check geneve 6081 connection"
+  nc -zu -w 3 127.0.0.1 6081
+  if [[ $? != 0 ]]; then
+    echo "The nc command is not installed or the 6081 port for geneve encapsulation may be not available, please check if ovs-ovn pod is health"
+  fi
+}
+
 if [ $# -lt 1 ]; then
   showHelp
   exit 0
@@ -3444,6 +3499,9 @@ case $subcommand in
     ;;
   tuning)
     tuning "$@"
+    ;;
+  env-check)
+    env-check
     ;;
   *)
   showHelp
